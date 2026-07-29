@@ -107,6 +107,7 @@ valid_workdir() {
     if [[ ! -d "${dir}" ]]; then
       log_warn "Membuat direktori ${cyan}${dir}${reset}..."
       sudo mkdir -p "${dir}"
+      cp -R templates "${template_dir}"
       log_success "Direktori ${cyan}${dir}${reset} berhasil dibuat."
       log_buffer+=("  [OK] Membuat direktori ${dir}.")
     else
