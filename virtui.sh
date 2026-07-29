@@ -15,6 +15,8 @@ src_dir="/var/lib/libvirt/images"
 dst_dir="/var/lib/libvirt/vms"
 log_dir="${dst_dir}/log"
 template_dir="${dst_dir}/templates"
+xml_tmp_dir="/tmp/virtui_xml"
+
 log_file="${log_dir}/system_check.log"
 vm_log_file="${log_dir}/create_vm.log"
 
@@ -65,20 +67,12 @@ safe_replace() {
   sed -i "s|${search}|${escaped_replace}|g" "${filepath}"
 }
 
-# write_log_raw() {
-#   local clean_text
-#   clean_text=$(echo -e "$1" | sed -E 's/\x1B\[[0-9;]*[a-zA-Z]//g')
-#   mkdir -p "$(dirname "${log_file}")" 2>/dev/null
-#   echo "${clean_text}" >> "${log_file}"
-# }
-
 write_log_raw() {
   local clean_text
   clean_text=$(echo -e "$1" | sed -E 's/\x1B\[[0-9;]*[a-zA-Z]//g')
   local target_dir
   target_dir="$(dirname "${log_file}")"
 
-  # Tulis log hanya jika direktori ada dan user memiliki izin akses write
   if [[ -d "${target_dir}" && -w "${target_dir}" ]]; then
     echo "${clean_text}" >> "${log_file}"
   elif [[ -d "${target_dir}" ]]; then
@@ -98,16 +92,13 @@ valid_workdir() {
   local target_perm="2775"
   local log_buffer=()
 
-  # Tampung log awal ke buffer sebelum file log diinisialisasi
   log_buffer+=("--------------------------------------------------")
   log_buffer+=("1. Memeriksa Direktori Kerja (Storage Pool & Destination)")
 
   for dir in "${src_dir}" "${dst_dir}" "${log_dir}" "${template_dir}"; do
-    # 1. Pengecekan Keberadaan Direktori
     if [[ ! -d "${dir}" ]]; then
       log_warn "Membuat direktori ${cyan}${dir}${reset}..."
       sudo mkdir -p "${dir}"
-      cp -R templates "${template_dir}"
       log_success "Direktori ${cyan}${dir}${reset} berhasil dibuat."
       log_buffer+=("  [OK] Membuat direktori ${dir}.")
     else
@@ -115,7 +106,6 @@ valid_workdir() {
       log_buffer+=("  [OK] Direktori ${dir} sudah ada.")
     fi
 
-    # 2. Pengecekan Ownership (User:Group)
     local current_owner_group
     current_owner_group="$(stat -c "%U:%G" "${dir}" 2>/dev/null)"
 
@@ -129,7 +119,6 @@ valid_workdir() {
       log_buffer+=("  [OK] Ownership ${dir} sesuai (${target_owner}:${target_group}).")
     fi
 
-    # 3. Pengecekan Permission (Mode Oktal)
     local current_perm
     current_perm="$(stat -c "%a" "${dir}" 2>/dev/null)"
 
@@ -144,8 +133,6 @@ valid_workdir() {
     fi
   done
 
-  # --- INISIALISASI FILE LOG ---
-  # Pada titik ini log_dir dipastikan SUDAH ADA dan PERMISSION SUDAH BENAR untuk $USER
   local current_time
   current_time="$(date '+%Y-%m-%d %H:%M:%S')"
   cat <<EOF > "${log_file}"
@@ -153,7 +140,6 @@ valid_workdir() {
 
 EOF
 
-  # Flushing log buffer ke file log secara aman
   for line in "${log_buffer[@]}"; do
     write_log_raw "${line}"
   done
@@ -293,17 +279,8 @@ run_system_checks() {
   show_banner
   echo -e "${bold}${yellow}>>> MENJALANKAN PENGECEKAN SISTEM & DEPENDENSI <<<${reset}\n"
 
-#   local current_time
-#   current_time="$(date '+%Y-%m-%d %H:%M:%S')"
-
-#   # Reset/Overwrite log file dengan header timestamp
-#   mkdir -p "${log_dir}" 2>/dev/null
-#   cat <<EOF > "${log_file}"
-# [${current_time}] virtUI Pengecekan Sistem & Dependensi Terakhir
-
-# EOF
-
   local stat_supp=1 stat_pkg=1 stat_nest=1 stat_usr=1 stat_work=1 stat_img=1
+
   valid_workdir   && stat_work=0
   valid_support   && stat_supp=0
   valid_package   && stat_pkg=0
@@ -319,7 +296,6 @@ run_system_checks() {
     if [[ $1 -eq 0 ]]; then echo -e "${green}✔${reset}"; else echo -e "${red}✖${reset}"; fi
   }
 
-  # Tulis Ringkasan ke Log File
   {
     echo "--------------------------------------------------"
     echo "  RINGKASAN PENGECEKAN SISTEM:"
@@ -334,7 +310,6 @@ run_system_checks() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Complete: virtUI Pengecekan Sistem & Dependensi"
   } >> "${log_file}"
 
-  # Tampilan Ringkasan di Terminal
   draw_line
   echo -e "  ${bold}RINGKASAN PENGECEKAN SISTEM:${reset}\n"
   echo -e "  [$(icon_color $stat_work)] Kesiapan Storage Pool & Folder Log"
@@ -349,10 +324,263 @@ run_system_checks() {
   pause
 }
 
+# ==========================================
+# STORAGE POOL MANAGEMENT (MENU BARU)
+# ==========================================
+# [NEW UPDATE: Line ~377 - ~525] modul fungsi manajemen storage pool
+pool_list_action() {
+  draw_line
+  echo -e "${bold}Daftar Storage Pool Terdaftar:${reset}\n"
+  virsh pool-list --all
+}
+
+pool_info_action() {
+  draw_line
+  read -e -p "  Masukkan Nama Storage Pool: " p_name
+  if virsh pool-info --pool "${p_name}" >/dev/null 2>&1; then
+    echo -e "\n${bold}Informasi Storage Pool '${p_name}':${reset}"
+    virsh pool-info --pool "${p_name}"
+  else
+    log_fail "Storage Pool '${p_name}' tidak ditemukan!"
+  fi
+}
+
+pool_dump_action() {
+  draw_line
+  read -e -p "  Masukkan Nama Storage Pool: " p_name
+  if virsh pool-dumpxml --pool "${p_name}" >/dev/null 2>&1; then
+    echo -e "\n${bold}Konfigurasi XML Storage Pool '${p_name}':${reset}"
+    draw_line
+    virsh pool-dumpxml --pool "${p_name}"
+    draw_line
+  else
+    log_fail "Storage Pool '${p_name}' tidak ditemukan!"
+  fi
+}
+
+pool_create_action() {
+  draw_line
+  echo -e "${bold}Buat Storage Pool Baru (Directory Based)${reset}\n"
+  read -e -i "vms_pool" -p "  Masukkan Nama Pool: " p_name
+
+  if virsh pool-list --all --name | grep -qwF -- "${p_name}"; then
+    log_fail "Storage Pool dengan nama '${p_name}' sudah ada!"
+    return 1
+  fi
+
+  read -e -i "/data/vms" -p "  Masukkan Path Target Folder: " p_path
+
+  if [[ ! -d "${p_path}" ]]; then
+    log_warn "Folder ${p_path} belum ada. Membuat folder..."
+    sudo mkdir -p "${p_path}"
+    sudo chown -R "$USER:libvirt" "${p_path}"
+    sudo chmod 2775 "${p_path}"
+  fi
+
+  log_info "Mendefinisikan Storage Pool..."
+  if virsh pool-define-as --name "${p_name}" --type dir --target "${p_path}"; then
+    log_success "Storage Pool '${p_name}' berhasil didefinisikan."
+    virsh pool-build "${p_name}" 2>/dev/null
+    virsh pool-start "${p_name}"
+    virsh pool-autostart "${p_name}"
+    log_success "Storage Pool '${p_name}' berhasil diaktifkan & diset autostart!"
+  else
+    log_fail "Gagal membuat Storage Pool!"
+  fi
+}
+
+pool_destroy_action() {
+  draw_line
+  read -e -p "  Masukkan Nama Storage Pool yang ingin dihentikan: " p_name
+  if virsh pool-destroy --pool "${p_name}"; then
+    log_success "Storage Pool '${p_name}' berhasil dihentikan."
+  else
+    log_fail "Gagal menghentikan Storage Pool '${p_name}'!"
+  fi
+}
+
+pool_undefine_action() {
+  draw_line
+  read -e -p "  Masukkan Nama Storage Pool yang ingin dihapus definisinya: " p_name
+  if virsh pool-undefine --pool "${p_name}"; then
+    log_success "Definisi Storage Pool '${p_name}' berhasil dihapus."
+  else
+    log_fail "Gagal menghapus definisi Storage Pool '${p_name}'!"
+  fi
+}
+
+view_pool_menu() {
+  while true; do
+    show_banner
+    echo -e "  ${bold}SUB-MENU MANAJEMEN STORAGE POOL LIBVIRT:${reset}\n"
+    echo -e "   [${cyan}1${reset}] Tampilkan Daftar Storage Pool (pool-list)"
+    echo -e "   [${cyan}2${reset}] Tampilkan Detail Informasi Pool (pool-info)"
+    echo -e "   [${cyan}3${reset}] Tampilkan XML Storage Pool (pool-dumpxml)"
+    echo -e "   [${cyan}4${reset}] Buat Storage Pool Baru (pool-define-as / dir-based)"
+    echo -e "   [${cyan}5${reset}] Hentikan Storage Pool (pool-destroy)"
+    echo -e "   [${cyan}6${reset}] Hapus Definisi Storage Pool (pool-undefine)"
+    echo -e "   [${cyan}0${reset}] Kembali ke Menu Utama"
+    echo ""
+    draw_line
+    read -e -p "  Masukkan pilihan [0-6]: " pool_opt
+    case $pool_opt in
+      1) pool_list_action; pause ;;
+      2) pool_info_action; pause ;;
+      3) pool_dump_action; pause ;;
+      4) pool_create_action; pause ;;
+      5) pool_destroy_action; pause ;;
+      6) pool_undefine_action; pause ;;
+      0) break ;;
+      *) log_fail "Pilihan tidak valid!"; sleep 1 ;;
+    esac
+  done
+}
+
+# ==========================================
+# VIRTUAL NETWORK MANAGEMENT (MENU BARU)
+# ==========================================
+# [NEW UPDATE: Line ~526 - ~725] modul fungsi manajemen virtual network (routed mode)
+net_list_action() {
+  draw_line
+  echo -e "${bold}Daftar Virtual Network Terdaftar:${reset}\n"
+  virsh net-list --all
+}
+
+net_info_action() {
+  draw_line
+  read -e -p "  Masukkan Nama Virtual Network: " n_name
+  if virsh net-info --network "${n_name}" >/dev/null 2>&1; then
+    echo -e "\n${bold}Informasi Network '${n_name}':${reset}"
+    virsh net-info --network "${n_name}"
+  else
+    log_fail "Virtual Network '${n_name}' tidak ditemukan!"
+  fi
+}
+
+net_dhcp_leases_action() {
+  draw_line
+  read -e -p "  Masukkan Nama Virtual Network: " n_name
+  if virsh net-dhcp-leases --network "${n_name}" >/dev/null 2>&1; then
+    echo -e "\n${bold}Daftar DHCP Leases Network '${n_name}':${reset}"
+    virsh net-dhcp-leases --network "${n_name}"
+  else
+    log_fail "Virtual Network '${n_name}' tidak ditemukan atau DHCP tidak aktif!"
+  fi
+}
+
+net_dump_action() {
+  draw_line
+  read -e -p "  Masukkan Nama Virtual Network: " n_name
+  if virsh net-dumpxml --network "${n_name}" >/dev/null 2>&1; then
+    echo -e "\n${bold}Konfigurasi XML Virtual Network '${n_name}':${reset}"
+    draw_line
+    virsh net-dumpxml --network "${n_name}"
+    draw_line
+  else
+    log_fail "Virtual Network '${n_name}' tidak ditemukan!"
+  fi
+}
+
+net_create_action() {
+  draw_line
+  echo -e "${bold}Buat Virtual Network Baru (Forward Mode: Route)${reset}\n"
+  read -e -i "routed-net" -p "  Masukkan Nama Virtual Network: " n_name
+
+  if virsh net-list --all --name | grep -qwF -- "${n_name}"; then
+    log_fail "Virtual Network dengan nama '${n_name}' sudah ada!"
+    return 1
+  fi
+
+  read -e -i "virbr1" -p "  Masukkan Nama Bridge Interface Host: " n_bridge
+  read -e -i "192.168.100.1" -p "  Masukkan IP Gateway Host: " n_gw
+  read -e -i "255.255.255.0" -p "  Masukkan Netmask: " n_mask
+  read -e -i "192.168.100.10" -p "  Masukkan Range DHCP Start: " n_dhcp_start
+  read -e -i "192.168.100.254" -p "  Masukkan Range DHCP End: " n_dhcp_end
+
+  mkdir -p "${xml_tmp_dir}" 2>/dev/null
+  local xml_file="${xml_tmp_dir}/${n_name}.xml"
+
+  cat <<EOF > "${xml_file}"
+<network>
+  <name>${n_name}</name>
+  <forward mode='route'/>
+  <bridge name='${n_bridge}' stp='on' delay='0'/>
+  <ip address='${n_gw}' netmask='${n_mask}'>
+    <dhcp>
+      <range start='${n_dhcp_start}' end='${n_dhcp_end}'/>
+    </dhcp>
+  </ip>
+</network>
+EOF
+
+  log_info "Mendefinisikan Virtual Network Routed dari XML..."
+  if virsh net-define "${xml_file}"; then
+    log_success "Virtual Network '${n_name}' berhasil didefinisikan."
+    virsh net-start "${n_name}"
+    virsh net-autostart "${n_name}"
+    log_success "Virtual Network '${n_name}' berhasil diaktifkan & diset autostart!"
+    # rm -f "${xml_file}"
+  else
+    log_fail "Gagal membuat Virtual Network!"
+    # rm -f "${xml_file}"
+  fi
+}
+
+net_destroy_action() {
+  draw_line
+  read -e -p "  Masukkan Nama Virtual Network yang ingin dihentikan: " n_name
+  if virsh net-destroy --network "${n_name}"; then
+    log_success "Virtual Network '${n_name}' berhasil dihentikan."
+  else
+    log_fail "Gagal menghentikan Virtual Network '${n_name}'!"
+  fi
+}
+
+net_undefine_action() {
+  draw_line
+  read -e -p "  Masukkan Nama Virtual Network yang ingin dihapus: " n_name
+  if virsh net-undefine --network "${n_name}"; then
+    log_success "Definisi Virtual Network '${n_name}' berhasil dihapus."
+  else
+    log_fail "Gagal menghapus definisi Virtual Network '${n_name}'!"
+  fi
+}
+
+view_net_menu() {
+  while true; do
+    show_banner
+    echo -e "  ${bold}SUB-MENU MANAJEMEN VIRTUAL NETWORK LIBVIRT:${reset}\n"
+    echo -e "   [${cyan}1${reset}] Tampilkan Daftar Network (net-list)"
+    echo -e "   [${cyan}2${reset}] Tampilkan Detail Informasi Network (net-info)"
+    echo -e "   [${cyan}3${reset}] Tampilkan DHCP Leases (net-dhcp-leases)"
+    echo -e "   [${cyan}4${reset}] Tampilkan XML Network (net-dumpxml)"
+    echo -e "   [${cyan}5${reset}] Buat Virtual Network Baru (Forward Mode: Route)"
+    echo -e "   [${cyan}6${reset}] Hentikan Virtual Network (net-destroy)"
+    echo -e "   [${cyan}7${reset}] Hapus Definisi Virtual Network (net-undefine)"
+    echo -e "   [${cyan}0${reset}] Kembali ke Menu Utama"
+    echo ""
+    draw_line
+    read -e -p "  Masukkan pilihan [0-7]: " net_opt
+    case $net_opt in
+      1) net_list_action; pause ;;
+      2) net_info_action; pause ;;
+      3) net_dhcp_leases_action; pause ;;
+      4) net_dump_action; pause ;;
+      5) net_create_action; pause ;;
+      6) net_destroy_action; pause ;;
+      7) net_undefine_action; pause ;;
+      0) break ;;
+      *) log_fail "Pilihan tidak valid!"; sleep 1 ;;
+    esac
+  done
+}
+
+# ==========================================
+# LOG VIEW FUNCTIONS
+# ==========================================
 view_last_log() {
   show_banner
   echo -e "${bold}${yellow}>>> LOG PENGECEKAN SISTEM TERAKHIR <<<${reset}\n"
-
   if [[ -f "${log_file}" ]]; then
     draw_line
     cat "${log_file}"
@@ -367,7 +595,6 @@ view_last_log() {
 view_vm_log() {
   show_banner
   echo -e "${bold}${yellow}>>> LOG RIWAYAT PEMBUATAN VM <<<${reset}\n"
-
   if [[ -f "${vm_log_file}" ]]; then
     draw_line
     cat "${vm_log_file}"
@@ -390,19 +617,10 @@ view_log_menu() {
     draw_line
     read -e -p "  Masukkan pilihan [0-2]: " log_opt
     case $log_opt in
-      1)
-        view_last_log
-        ;;
-      2)
-        view_vm_log
-        ;;
-      0)
-        break
-        ;;
-      *)
-        log_fail "Pilihan tidak valid!"
-        sleep 1
-        ;;
+      1) view_last_log ;;
+      2) view_vm_log ;;
+      0) break ;;
+      *) log_fail "Pilihan tidak valid!"; sleep 1 ;;
     esac
   done
 }
@@ -413,7 +631,6 @@ view_log_menu() {
 valid_name() {
   draw_line
   local default_name="vm$(date +%d_%m_%y)"
-
   while true; do
     read -e -i "${default_name}" -p "  Masukkan Nama VM: " vm_name
     if virsh list --all --name | grep -qwF -- "${vm_name}"; then
@@ -547,8 +764,6 @@ valid_primary_disk() {
   current_ts=$(date +%d_%m_%y_%H_%M_%S)
 
   log_info "Memproses cloning image dari base template..."
-  # local os_idx=$(( vm_os - 1 ))
-  # vm_disk1=$(valid_clone_image "${os_images[${os_idx}]}" "${os_images[${os_idx}]}-${current_ts}.img")
   vm_disk1=$(valid_clone_image "${selected_os_image}" "${selected_os_image}-${current_ts}.img")
   log_success "Primary disk berhasil dibuat di: ${yellow}${vm_disk1}${reset}"
 
@@ -618,55 +833,6 @@ valid_primary_disk() {
   fi
 }
 
-# valid_extended_disk_size() {
-  # if [[ "${extended_disk_size}" =~ ^[0-9]+$ && "${extended_disk_size}" -gt 0 ]]; then
-    # local pdisk_path="${dst_dir}/${vm_name}-disk${i}.qcow2"
-    # log_info "Membuat disk extended #${i} di ${pdisk_path}..."
-    # qemu-img create -f qcow2 "${pdisk_path}" "${extended_disk_size}G" > /dev/null
-    # disk_extended+=(--disk "path=${pdisk_path},format=qcow2")
-    # log_success "Disk tambahan #${i} (${extended_disk_size} GiB) berhasil dibuat."
-  # else
-    # log_fail "Ukuran disk tidak valid! Harap masukkan angka bulat positif ( > 0 )."
-    # read -e -p "  Masukkan kembali ukuran disk tambahan (dalam GiB): " extended_disk_size
-    # valid_extended_disk_size
-  # fi
-# }
-
-# valid_extended_disk_count() {
-  # draw_line
-  # read -e -i "0" -p "  Jumlah disk tambahan yang ingin dibuat (0 jika tidak ada): " extended_disk_count
-# 
-  # if [[ ! "${extended_disk_count}" =~ ^[0-9]+$ ]]; then
-    # log_fail "Input tidak valid! Harap masukkan angka bulat positif atau 0."
-    # valid_extended_disk_count
-    # return
-  # fi
-# 
-  # if [[ "${extended_disk_count}" -eq 0 ]]; then
-    # log_info "Tidak ada disk tambahan yang akan dibuat."
-    # disk_extended=()
-    # return
-  # fi
-  # disk_extended=()
-# 
-  # local i
-  # for (( i=1; i<=extended_disk_count; i++ )); do
-    # echo -e "\n  ${cyan}[Disk Tambahan #${i}]${reset}"
-    # read -e -i "10" -p "  Masukkan ukuran Disk #${i} (dalam GiB): " extended_disk_size
-    # valid_extended_disk_size
-  # done
-# }
-
-# valid_extended_disk() {
-  # draw_line
-  # read -e -p "  Apakah ingin menambah disk tambahan (extended)? (y/N): " extended_disk_response
-  # if [[ "${extended_disk_response}" =~ ^[Yy]$ ]]; then
-    # valid_extended_disk_count
-  # else
-    # log_info "Tanpa disk tambahan."
-  # fi
-# }
-
 valid_extended_disk() {
   draw_line
   read -e -p "  Apakah ingin menambah disk tambahan (extended)? (y/N): " extended_disk_response
@@ -690,12 +856,6 @@ valid_extended_disk() {
       log_fail "Input tidak valid! Harap masukkan angka bulat positif atau 0."
     fi
   done
-
-  # if [[ "${extended_disk_count}" -eq 0 ]]; then
-    # log_info "Tidak ada disk tambahan yang akan dibuat."
-    # disk_extended=()
-    # return 0
-  # fi
 
   disk_extended=()
   local i
@@ -916,7 +1076,6 @@ valid_cloud_init() {
 
   local ip_gw_clean="${ip_gw%%/*}"
 
-  # Replace variabel user-data
   safe_replace "__VM_NAME__" "${vm_name}" "${cloud_dir}/user-data"
   safe_replace "__VM_USER__" "${vm_user}" "${cloud_dir}/user-data"
   safe_replace "__VM_HASHED_PASS__" "${hashed_pass}" "${cloud_dir}/user-data"
@@ -924,14 +1083,11 @@ valid_cloud_init() {
   safe_replace "__IP_NUM__" "${ip_num}" "${cloud_dir}/user-data"
   safe_replace "__IP_GW__" "${ip_gw_clean}" "${cloud_dir}/user-data"
 
-  # Replace variabel meta-data
   safe_replace "__VM_NAME__" "${vm_name}" "${cloud_dir}/meta-data"
 
-  # Replace variabel network-config
   safe_replace "__IP_NUM__" "${ip_num}" "${cloud_dir}/network-config"
   safe_replace "__IP_GW__" "${ip_gw_clean}" "${cloud_dir}/network-config"
 
-  # 4. Generate ISO
   log_info "Membuat file ISO Cloud-Init..."
   log_info "Menginjeksi user-data, meta-data, dan network-config ke dalam ISO"
 
@@ -941,11 +1097,10 @@ valid_cloud_init() {
     "${cloud_dir}/network-config" &>/dev/null; then
     
     log_success "Cloud-Init ISO berhasil dibuat: ${yellow}${iso_path}${reset}"
-    # rm -rf "${cloud_dir}"
     return 0
   else
     log_fail "Gagal membuat ISO Cloud-Init menggunakan genisoimage!"
-    rm -rf "${cloud_dir}"
+    # rm -rf "${cloud_dir}"
     return 1
   fi
 }
@@ -1037,19 +1192,22 @@ run_create_vm() {
 }
 
 # ==========================================
-# MAIN MENU LOOP
+# MAIN MENU LOOP (UPDATED)
 # ==========================================
+# [NEW UPDATE: Line ~790 - ~845] pembaruan pilihan menu utama
 main_menu() {
   while true; do
     show_banner
     echo -e "  ${bold}PILIH MENU UTAMA:${reset}\n"
     echo -e "   [${cyan}1${reset}] Pengecekan Sistem & Dependensi (Environment Check)"
     echo -e "   [${cyan}2${reset}] Buat Virtual Machine Baru (Create VM)"
-    echo -e "   [${cyan}3${reset}] Manajemen Log System & VM (View Logs)"
+    echo -e "   [${cyan}3${reset}] Manajemen Storage Pool (Storage Pool Management)"
+    echo -e "   [${cyan}4${reset}] Manajemen Virtual Network (Network Management)"
+    echo -e "   [${cyan}5${reset}] Manajemen Log System & VM (View Logs)"
     echo -e "   [${cyan}0${reset}] Keluar (Exit)"
     echo ""
     draw_line
-    read -e -p "  Masukkan pilihan [0-3]: " opt
+    read -e -p "  Masukkan pilihan [0-5]: " opt
     case $opt in
       1)
         run_system_checks
@@ -1058,6 +1216,12 @@ main_menu() {
         run_create_vm
         ;;
       3)
+        view_pool_menu
+        ;;
+      4)
+        view_net_menu
+        ;;
+      5)
         view_log_menu
         ;;
       0)
