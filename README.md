@@ -183,3 +183,4 @@ echo "user1:Str0ngPass!" | chpasswd
 - https://libvirt.org/drvqemu.html#driver-instances
 - https://libvirt.org/formatnetwork.html#routed-network-config
 - https://libvirt.org/formatnetwork.html#example-configuration
+- https://wiki.alpinelinux.org/wiki/Setting_up_a_new_user
